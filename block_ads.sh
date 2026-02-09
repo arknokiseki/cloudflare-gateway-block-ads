@@ -23,16 +23,10 @@ function error() {
     exit 1
 }
 
-function silent_error() {
-    echo "::warning::$1"
-    exit 0
-}
-
 # ==========================================
 # 1. DOWNLOAD & PREPARE LISTS
 # ==========================================
 
-# 1. Define External Lists
 lists=(
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardDNS.txt"
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardMobileSpyware.txt"
@@ -40,22 +34,24 @@ lists=(
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardTracking.txt"
 )
 
-# 2. Define Custom "Hard Block" Domains
-# Add domains here to force-block them (and their subdomains)
+# Custom Blocklist
 custom_blocklist=(
-#
+  "adjust.com"
+  "appsflyer.com"
+  "segment.io"
+  "branch.io"
+  "mparticle.com"
+  "amplitude.com"
 )
 
 echo "--- DEBUG: Starting Download ---"
 rm -f combined_temp.txt
 
-# Download External Lists
 for url in "${lists[@]}"; do
     echo "Fetching: $url"
     curl -sSfL --retry "$MAX_RETRIES" --retry-all-errors "$url" >> combined_temp.txt || echo "::warning::Failed to download $url"
 done
 
-# Add Custom Blocklist to the file
 echo "Adding Custom Hard-Block Domains..."
 for domain in "${custom_blocklist[@]}"; do
     echo "$domain" >> combined_temp.txt
@@ -63,16 +59,12 @@ done
 
 echo "--- DEBUG: Processing & Cleaning ---"
 
-# CLEANING PIPELINE:
-# 1. tr -d '\r'        -> Remove Windows carriage returns (CRITICAL)
-# 2. awk ...           -> Handle "0.0.0.0 domain" format
-# 3. cut ...           -> Remove comments
-# 4. tr -d ' '         -> Remove spaces
-# 5. grep -vE ...      -> Remove empty lines
-# 6. grep -vE ...      -> Remove Localhost/Loopback IPs
-# 7. grep -vE ...      -> Remove Literal IP addresses (1.2.3.4)
-# 8. grep -v ...       -> Whitelist Pixiv (Safety)
-# 9. sort | uniq       -> Deduplicate
+# THE BULLETPROOF CLEANER:
+# 1. Standard cleanup (tr, awk, cut)
+# 2. POSITIVE FILTER (grep -E): Only allow a-z, 0-9, dot (.), hyphen (-), and underscore (_)
+#    -> This automatically kills comma and any other garbage.
+# 3. IP FILTER: Remove literal IPs
+# 4. WHITELIST: Save Pixiv
 
 cat combined_temp.txt \
   | tr -d '\r' \
@@ -80,7 +72,7 @@ cat combined_temp.txt \
   | cut -d '#' -f 1 \
   | tr -d ' ' \
   | grep -vE '^\s*$' \
-  | grep -vE '^(0\.0\.0\.0|127\.0\.0\.1|localhost|::1)$' \
+  | grep -E '^[a-zA-Z0-9._-]+$' \
   | grep -vE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
   | sort | uniq > oisd_small_domainswild2.txt
 
@@ -92,24 +84,17 @@ rm -f combined_temp.txt
 # ==========================================
 
 echo "--- DEBUG: Verification ---"
-
-# Check if file exists and is not empty
 [[ -s oisd_small_domainswild2.txt ]] || error "The domains list is empty"
 
-# Count lines
 total_lines=$(wc -l < oisd_small_domainswild2.txt)
 echo "Total domains found: $total_lines"
-
-# PRINT THE FIRST 5 LINES
 echo "Peek at the first 5 domains:"
 head -n 5 oisd_small_domainswild2.txt
 
-# Check against limit
 if (( total_lines > MAX_LIST_SIZE * MAX_LISTS )); then
     error "List too large: $total_lines domains. Limit is $((MAX_LIST_SIZE * MAX_LISTS))."
 fi
 
-# Calculate required lists
 total_lists=$((total_lines / MAX_LIST_SIZE))
 [[ $((total_lines % MAX_LIST_SIZE)) -ne 0 ]] && total_lists=$((total_lists + 1))
 echo "Lists required: $total_lists"
@@ -121,45 +106,33 @@ echo "Lists required: $total_lists"
 
 echo "--- DEBUG: Syncing with Cloudflare ---"
 
-# Get current lists from Cloudflare
 current_lists=$(curl -sSfL --retry "$MAX_RETRIES" --retry-all-errors -X GET "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists" \
     -H "Authorization: Bearer ${API_TOKEN}" \
-    -H "Content-Type: application/json") || error "Failed to get current lists from Cloudflare"
+    -H "Content-Type: application/json") || error "Failed to get current lists"
 
-# Get current policies
 current_policies=$(curl -sSfL --retry "$MAX_RETRIES" --retry-all-errors -X GET "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/rules" \
     -H "Authorization: Bearer ${API_TOKEN}" \
     -H "Content-Type: application/json") || error "Failed to get current policies"
 
-# Check existing lists
 current_lists_count=$(echo "${current_lists}" | jq -r --arg PREFIX "${PREFIX}" 'if (.result | length > 0) then .result | map(select(.name | contains($PREFIX))) | length else 0 end')
 current_lists_count_without_prefix=$(echo "${current_lists}" | jq -r --arg PREFIX "${PREFIX}" 'if (.result | length > 0) then .result | map(select(.name | contains($PREFIX) | not)) | length else 0 end')
 
 echo "Existing lists: $current_lists_count"
 
-# Check if we have space
 if [[ ${total_lists} -gt $((MAX_LISTS - current_lists_count_without_prefix)) ]]; then
-    error "Not enough space in Cloudflare account for $total_lists new lists."
+    error "Not enough space in Cloudflare account."
 fi
 
-# Split big file into chunks
 split -l ${MAX_LIST_SIZE} oisd_small_domainswild2.txt oisd_small_domainswild2.txt.
-
-chunked_lists=()
-for file in oisd_small_domainswild2.txt.*; do
-    chunked_lists+=("${file}")
-done
+chunked_lists=(); for file in oisd_small_domainswild2.txt.*; do chunked_lists+=("${file}"); done
 
 used_list_ids=()
 excess_list_ids=()
 list_counter=1
 
-# ------------------------------------------
-# A. UPDATE EXISTING LISTS (PATCH)
-# ------------------------------------------
+# A. UPDATE EXISTING LISTS
 if [[ ${current_lists_count} -gt 0 ]]; then
     for list_id in $(echo "${current_lists}" | jq -r --arg PREFIX "${PREFIX}" '.result | map(select(.name | contains($PREFIX))) | .[].id'); do
-        # If no more chunks left, delete this old list later
         if [[ ${#chunked_lists[@]} -eq 0 ]]; then
             echo "Marking unused list for deletion: ${list_id}"
             excess_list_ids+=("${list_id}")
@@ -167,24 +140,19 @@ if [[ ${current_lists_count} -gt 0 ]]; then
         fi
 
         echo "Overwriting list ${list_counter}/${total_lists} (ID: $list_id)..."
-
-        # Get old items to remove (Logic: Get current items -> Remove them all -> Add new items)
-        # Note: This is inefficient but standard for this script.
+        
+        # Get old items
         list_items=$(curl -sSfL -X GET "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists/${list_id}/items?limit=${MAX_LIST_SIZE}" \
         -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json")
-        
         list_items_values=$(echo "${list_items}" | jq -r '.result | map(.value) | map(select(. != null))')
         
-        # Get new items to add
+        # Get new items
         list_items_array=$(jq -R -s 'split("\n") | map(select(length > 0) | { "value": . })' "${chunked_lists[0]}")
 
-        # Construct JSON
         payload=$(jq -n --argjson append_items "$list_items_array" --argjson remove_items "$list_items_values" '{
-            "append": $append_items,
-            "remove": $remove_items
+            "append": $append_items, "remove": $remove_items
         }')
 
-        # SEND PATCH WITH DEBUGGING (The Fix for Error 400)
         response=$(curl -sL -w "\nHTTP_STATUS:%{http_code}" -X PATCH "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists/${list_id}" \
         -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$payload")
 
@@ -192,7 +160,7 @@ if [[ ${current_lists_count} -gt 0 ]]; then
         body=$(echo "$response" | sed '$d')
 
         if [[ "$http_status" -ge 400 ]]; then
-            echo "::error::Cloudflare Patch Error ($http_status) for List ${list_id}: $body"
+            echo "::error::Patch Error ($http_status) List ${list_id}: $body"
             exit 1
         fi
 
@@ -203,20 +171,15 @@ if [[ ${current_lists_count} -gt 0 ]]; then
     done
 fi
 
-# ------------------------------------------
-# B. CREATE NEW LISTS (POST)
-# ------------------------------------------
+# B. CREATE NEW LISTS
 for file in "${chunked_lists[@]}"; do
     formatted_counter=$(printf "%03d" "$list_counter")
     echo "Creating new list ${list_counter}/${total_lists}..."
 
     payload=$(jq -n --arg PREFIX "${PREFIX} - ${formatted_counter}" --argjson items "$(jq -R -s 'split("\n") | map(select(length > 0) | { "value": . })' "${file}")" '{
-        "name": $PREFIX,
-        "type": "DOMAIN",
-        "items": $items
+        "name": $PREFIX, "type": "DOMAIN", "items": $items
     }')
 
-    # SEND POST WITH DEBUGGING
     response=$(curl -sL -w "\nHTTP_STATUS:%{http_code}" -X POST "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists" \
         -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$payload")
 
@@ -224,14 +187,12 @@ for file in "${chunked_lists[@]}"; do
     body=$(echo "$response" | sed '$d')
 
     if [[ "$http_status" -ge 400 ]]; then
-        echo "::error::Cloudflare Create Error ($http_status): $body"
+        echo "::error::Create Error ($http_status): $body"
         exit 1
     fi
 
-    # Extract ID from success body
     list=$(echo "$body")
     used_list_ids+=("$(echo "${list}" | jq -r '.result.id')")
-    
     rm -f "${file}"
     list_counter=$((list_counter + 1))
 done
@@ -241,41 +202,23 @@ done
 # ==========================================
 
 echo "--- DEBUG: Updating Gateway Policy ---"
-
 policy_id=$(echo "${current_policies}" | jq -r --arg PREFIX "${PREFIX}" '.result | map(select(.name == $PREFIX)) | .[0].id')
 
-# Build Condition Logic
 conditions=()
 if [[ ${#used_list_ids[@]} -eq 1 ]]; then
-    conditions='
-                "any": {
-                    "in": {
-                        "lhs": { "splat": "dns.domains" },
-                        "rhs": "$'"${used_list_ids[0]}"'"
-                    }
-                }'
+    conditions='"any": { "in": { "lhs": { "splat": "dns.domains" }, "rhs": "$'"${used_list_ids[0]}"'" } }'
 else
     for list_id in "${used_list_ids[@]}"; do
-        conditions+=('{
-                "any": {
-                    "in": {
-                        "lhs": { "splat": "dns.domains" },
-                        "rhs": "$'"$list_id"'"
-                    }
-                }
-        }')
+        conditions+=('{ "any": { "in": { "lhs": { "splat": "dns.domains" }, "rhs": "$'"$list_id"'" } } }')
     done
     conditions=$(IFS=','; echo "${conditions[*]}")
     conditions='"or": ['"$conditions"']'
 fi
 
-# JSON Payload for Policy
 json_data='{
     "name": "'${PREFIX}'",
     "conditions": [ { "type":"traffic", "expression":{ '"$conditions"' } } ],
-    "action":"block",
-    "enabled":true,
-    "rule_settings":{ "block_page_enabled":false }
+    "action":"block", "enabled":true, "rule_settings":{ "block_page_enabled":false }
 }'
 
 if [[ -z "${policy_id}" || "${policy_id}" == "null" ]]; then
@@ -288,14 +231,13 @@ else
         -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$json_data" > /dev/null || error "Failed to update policy"
 fi
 
-# Cleanup old lists
 for list_id in "${excess_list_ids[@]}"; do
     echo "Deleting excess list ${list_id}..."
     curl -sSfL --retry "$MAX_RETRIES" -X DELETE "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists/${list_id}" \
         -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" > /dev/null
 done
 
-# Git Commit (Save state)
+# Git Commit
 git config --global user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
 git config --global user.name "$(gh api /users/${GITHUB_ACTOR} | jq .name -r)"
 git add oisd_small_domainswild2.txt
