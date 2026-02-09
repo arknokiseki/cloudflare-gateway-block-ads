@@ -177,8 +177,19 @@ for file in "${chunked_lists[@]}"; do
         "items": $items
     }')
 
-    list=$(curl -sSfL --retry "$MAX_RETRIES" -X POST "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists" \
-        -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$payload") || error "Failed to create list"
+    response=$(curl -sL -w "\nHTTP_STATUS:%{http_code}" -X POST "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists" \
+        -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$payload")
+
+    http_status=$(echo "$response" | tail -n1 | cut -d':' -f2)
+    body=$(echo "$response" | sed '$d')
+
+    if [[ "$http_status" -ge 400 ]]; then
+        echo "::error::Cloudflare Error ($http_status): $body"
+        exit 1
+    fi
+
+    # Extract ID from success body
+    list=$(echo "$body")
 
     used_list_ids+=("$(echo "${list}" | jq -r '.result.id')")
     rm -f "${file}"
