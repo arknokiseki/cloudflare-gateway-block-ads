@@ -57,6 +57,7 @@ cat combined_temp.txt \
   | cut -d '#' -f 1 \
   | tr -d ' ' \
   | grep -vE '^\s*$' \
+  | grep -vE '^(0\.0\.0\.0|127\.0\.0\.1|localhost|::1)$' \
   | sort | uniq > oisd_small_domainswild2.txt
 
 # Remove temp file
@@ -76,7 +77,7 @@ total_lines=$(wc -l < oisd_small_domainswild2.txt)
 echo "Total domains found: $total_lines"
 
 # PRINT THE FIRST 5 LINES (Crucial Debugging)
-echo "Peek at the first 5 domains (Check for 0.0.0.0 here):"
+echo "Peek at the first 5 domains:"
 head -n 5 oisd_small_domainswild2.txt
 
 # Check against limit
