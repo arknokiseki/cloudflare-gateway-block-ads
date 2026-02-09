@@ -35,7 +35,8 @@ for url in "${lists[@]}"; do
 done
 
 # 3. Clean, Sort, Remove Duplicates
-cat combined_temp.txt | grep -vE '^\s*(#|$)' | sort | uniq > oisd_small_domainswild2.txt || silent_error "Failed to process the domains list"
+echo "Cleaning and formatting lists..."
+cat combined_temp.txt | sed 's/0.0.0.0 //' | grep -vE '^\s*(#|$)' | sort | uniq > oisd_small_domainswild2.txt || silent_error "Failed to process the domains list"
 
 # 4. Clean up temp file
 rm -f combined_temp.txt
