@@ -51,8 +51,13 @@ done
 
 echo "--- DEBUG: Processing & Cleaning ---"
 
-# THE FIX:
-cat combined_temp.txt | sed 's/0.0.0.0 //' | grep -vE '^\s*(#|$)' | sort | uniq > oisd_small_domainswild2.txt
+cat combined_temp.txt \
+  | tr -d '\r' \
+  | awk '$1 ~ /^(0\.0\.0\.0|127\.0\.0\.1|::1)$/ {print $2} !/^(0\.0\.0\.0|127\.0\.0\.1|::1)$/ {print $1}' \
+  | cut -d '#' -f 1 \
+  | tr -d ' ' \
+  | grep -vE '^\s*$' \
+  | sort | uniq > oisd_small_domainswild2.txt
 
 # Remove temp file
 rm -f combined_temp.txt
