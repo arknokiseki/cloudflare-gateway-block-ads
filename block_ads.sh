@@ -39,6 +39,7 @@ lists=(
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardDNS.txt"
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardMobileSpyware.txt"
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardApps.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardTracking.txt"
 )
 
 echo "--- DEBUG: Starting Download ---"
