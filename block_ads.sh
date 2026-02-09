@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Replace these variables with your actual Cloudflare API token and account ID
 API_TOKEN="$API_TOKEN"
 ACCOUNT_ID="$ACCOUNT_ID"
 PREFIX="Block ads"
@@ -8,33 +7,23 @@ MAX_LIST_SIZE=1000
 MAX_LISTS=100
 MAX_RETRIES=10
 
-# Define error function
 function error() {
     echo "Error: $1"
     rm -f oisd_small_domainswild2.txt.*
     exit 1
 }
 
-# Define silent error function
 function silent_error() {
     echo "Silent error: $1"
     rm -f oisd_small_domainswild2.txt.*
     exit 0
 }
 
-# --- START OF CUSTOM MULTI-LIST BLOCK ---
-
-# 1. Define your lists (converted to RAW URLs)
+# 1. Define the lists
 lists=(
-  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardApps.txt"
-  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardCNAME.txt"
-  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardCNAMEAds.txt"
-  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardCNAMEClickthroughs.txt"
-  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardCNAMEMicrosites.txt"
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardDNS.txt"
-  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardMobileAds.txt"
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardMobileSpyware.txt"
-  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardTracking.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardApps.txt"
 )
 
 # 2. Download and combine them into a temporary file
@@ -45,14 +34,11 @@ for url in "${lists[@]}"; do
     curl -sSfL --retry "$MAX_RETRIES" --retry-all-errors "$url" >> combined_temp.txt || echo "Warning: Failed to download $url"
 done
 
-# 3. Clean, Sort, Remove Duplicates, and Save to the filename the script expects
-# We grep out comments, sort the huge list, and remove duplicates to save space.
+# 3. Clean, Sort, Remove Duplicates
 cat combined_temp.txt | grep -vE '^\s*(#|$)' | sort | uniq > oisd_small_domainswild2.txt || silent_error "Failed to process the domains list"
 
 # 4. Clean up temp file
 rm -f combined_temp.txt
-
-# --- END OF CUSTOM MULTI-LIST BLOCK ---
 
 # Check if the file has changed
 git diff --exit-code oisd_small_domainswild2.txt > /dev/null && silent_error "The domains list has not changed"
