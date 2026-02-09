@@ -22,8 +22,37 @@ function silent_error() {
     exit 0
 }
 
-# Download the latest domains list
-curl -sSfL --retry "$MAX_RETRIES" --retry-all-errors https://small.oisd.nl/domainswild2 | grep -vE '^\s*(#|$)' > oisd_small_domainswild2.txt || silent_error "Failed to download the domains list"
+# --- START OF CUSTOM MULTI-LIST BLOCK ---
+
+# 1. Define your lists (converted to RAW URLs)
+lists=(
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardApps.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardCNAME.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardCNAMEAds.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardCNAMEClickthroughs.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardCNAMEMicrosites.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardDNS.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardMobileAds.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardMobileSpyware.txt"
+  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardTracking.txt"
+)
+
+# 2. Download and combine them into a temporary file
+echo "Downloading lists..."
+rm -f combined_temp.txt
+for url in "${lists[@]}"; do
+    echo "Fetching: $url"
+    curl -sSfL --retry "$MAX_RETRIES" --retry-all-errors "$url" >> combined_temp.txt || echo "Warning: Failed to download $url"
+done
+
+# 3. Clean, Sort, Remove Duplicates, and Save to the filename the script expects
+# We grep out comments, sort the huge list, and remove duplicates to save space.
+cat combined_temp.txt | grep -vE '^\s*(#|$)' | sort | uniq > oisd_small_domainswild2.txt || silent_error "Failed to process the domains list"
+
+# 4. Clean up temp file
+rm -f combined_temp.txt
+
+# --- END OF CUSTOM MULTI-LIST BLOCK ---
 
 # Check if the file has changed
 git diff --exit-code oisd_small_domainswild2.txt > /dev/null && silent_error "The domains list has not changed"
