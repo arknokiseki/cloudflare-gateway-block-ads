@@ -4,27 +4,25 @@
 # CONFIGURATION
 # ==========================================
 
-# API Keys (Secrets from GitHub)
+# API Keys
 API_TOKEN="$API_TOKEN"
 ACCOUNT_ID="$ACCOUNT_ID"
 
 # Settings
 PREFIX="Block ads"
 MAX_LIST_SIZE=1000
-MAX_LISTS=250
-MAX_RETRIES=10
+MAX_LISTS=275
+MAX_RETRIES=5
 
 # ==========================================
 # ERROR HANDLING
 # ==========================================
 
-# Define error function
 function error() {
     echo "::error::$1"
     exit 1
 }
 
-# Define silent error function
 function silent_error() {
     echo "::warning::$1"
     exit 0
@@ -34,7 +32,7 @@ function silent_error() {
 # 1. DOWNLOAD & PREPARE LISTS
 # ==========================================
 
-# Define your lists
+# 1. Define External Lists
 lists=(
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardDNS.txt"
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardMobileSpyware.txt"
@@ -42,15 +40,39 @@ lists=(
   "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardTracking.txt"
 )
 
+# 2. Define Custom "Hard Block" Domains
+# Add domains here to force-block them (and their subdomains)
+custom_blocklist=(
+#
+)
+
 echo "--- DEBUG: Starting Download ---"
 rm -f combined_temp.txt
 
+# Download External Lists
 for url in "${lists[@]}"; do
     echo "Fetching: $url"
     curl -sSfL --retry "$MAX_RETRIES" --retry-all-errors "$url" >> combined_temp.txt || echo "::warning::Failed to download $url"
 done
 
+# Add Custom Blocklist to the file
+echo "Adding Custom Hard-Block Domains..."
+for domain in "${custom_blocklist[@]}"; do
+    echo "$domain" >> combined_temp.txt
+done
+
 echo "--- DEBUG: Processing & Cleaning ---"
+
+# CLEANING PIPELINE:
+# 1. tr -d '\r'        -> Remove Windows carriage returns (CRITICAL)
+# 2. awk ...           -> Handle "0.0.0.0 domain" format
+# 3. cut ...           -> Remove comments
+# 4. tr -d ' '         -> Remove spaces
+# 5. grep -vE ...      -> Remove empty lines
+# 6. grep -vE ...      -> Remove Localhost/Loopback IPs
+# 7. grep -vE ...      -> Remove Literal IP addresses (1.2.3.4)
+# 8. grep -v ...       -> Whitelist Pixiv (Safety)
+# 9. sort | uniq       -> Deduplicate
 
 cat combined_temp.txt \
   | tr -d '\r' \
@@ -61,9 +83,6 @@ cat combined_temp.txt \
   | grep -vE '^(0\.0\.0\.0|127\.0\.0\.1|localhost|::1)$' \
   | grep -vE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
   | sort | uniq > oisd_small_domainswild2.txt
-
-# Remove temp file
-rm -f combined_temp.txt
 
 # Remove temp file
 rm -f combined_temp.txt
@@ -81,7 +100,7 @@ echo "--- DEBUG: Verification ---"
 total_lines=$(wc -l < oisd_small_domainswild2.txt)
 echo "Total domains found: $total_lines"
 
-# PRINT THE FIRST 5 LINES (Crucial Debugging)
+# PRINT THE FIRST 5 LINES
 echo "Peek at the first 5 domains:"
 head -n 5 oisd_small_domainswild2.txt
 
@@ -135,23 +154,27 @@ used_list_ids=()
 excess_list_ids=()
 list_counter=1
 
-# UPDATE EXISTING LISTS
+# ------------------------------------------
+# A. UPDATE EXISTING LISTS (PATCH)
+# ------------------------------------------
 if [[ ${current_lists_count} -gt 0 ]]; then
     for list_id in $(echo "${current_lists}" | jq -r --arg PREFIX "${PREFIX}" '.result | map(select(.name | contains($PREFIX))) | .[].id'); do
-        # If no more chunks left, delete this old list
+        # If no more chunks left, delete this old list later
         if [[ ${#chunked_lists[@]} -eq 0 ]]; then
-            echo "Deleting unused list: ${list_id}"
+            echo "Marking unused list for deletion: ${list_id}"
             excess_list_ids+=("${list_id}")
             continue
         fi
 
         echo "Overwriting list ${list_counter}/${total_lists} (ID: $list_id)..."
 
-        # Get old items to remove
+        # Get old items to remove (Logic: Get current items -> Remove them all -> Add new items)
+        # Note: This is inefficient but standard for this script.
         list_items=$(curl -sSfL -X GET "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists/${list_id}/items?limit=${MAX_LIST_SIZE}" \
         -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json")
+        
         list_items_values=$(echo "${list_items}" | jq -r '.result | map(.value) | map(select(. != null))')
-
+        
         # Get new items to add
         list_items_array=$(jq -R -s 'split("\n") | map(select(length > 0) | { "value": . })' "${chunked_lists[0]}")
 
@@ -161,9 +184,17 @@ if [[ ${current_lists_count} -gt 0 ]]; then
             "remove": $remove_items
         }')
 
-        # Send PATCH
-        curl -sSfL --retry "$MAX_RETRIES" -X PATCH "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists/${list_id}" \
-        -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$payload" > /dev/null || error "Failed to patch list ${list_id}"
+        # SEND PATCH WITH DEBUGGING (The Fix for Error 400)
+        response=$(curl -sL -w "\nHTTP_STATUS:%{http_code}" -X PATCH "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists/${list_id}" \
+        -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$payload")
+
+        http_status=$(echo "$response" | tail -n1 | cut -d':' -f2)
+        body=$(echo "$response" | sed '$d')
+
+        if [[ "$http_status" -ge 400 ]]; then
+            echo "::error::Cloudflare Patch Error ($http_status) for List ${list_id}: $body"
+            exit 1
+        fi
 
         used_list_ids+=("${list_id}")
         rm -f "${chunked_lists[0]}"
@@ -172,7 +203,9 @@ if [[ ${current_lists_count} -gt 0 ]]; then
     done
 fi
 
-# CREATE NEW LISTS
+# ------------------------------------------
+# B. CREATE NEW LISTS (POST)
+# ------------------------------------------
 for file in "${chunked_lists[@]}"; do
     formatted_counter=$(printf "%03d" "$list_counter")
     echo "Creating new list ${list_counter}/${total_lists}..."
@@ -183,6 +216,7 @@ for file in "${chunked_lists[@]}"; do
         "items": $items
     }')
 
+    # SEND POST WITH DEBUGGING
     response=$(curl -sL -w "\nHTTP_STATUS:%{http_code}" -X POST "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/lists" \
         -H "Authorization: Bearer ${API_TOKEN}" -H "Content-Type: application/json" --data "$payload")
 
@@ -190,14 +224,14 @@ for file in "${chunked_lists[@]}"; do
     body=$(echo "$response" | sed '$d')
 
     if [[ "$http_status" -ge 400 ]]; then
-        echo "::error::Cloudflare Error ($http_status): $body"
+        echo "::error::Cloudflare Create Error ($http_status): $body"
         exit 1
     fi
 
     # Extract ID from success body
     list=$(echo "$body")
-
     used_list_ids+=("$(echo "${list}" | jq -r '.result.id')")
+    
     rm -f "${file}"
     list_counter=$((list_counter + 1))
 done
