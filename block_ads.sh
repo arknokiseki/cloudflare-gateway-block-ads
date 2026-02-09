@@ -58,7 +58,11 @@ cat combined_temp.txt \
   | tr -d ' ' \
   | grep -vE '^\s*$' \
   | grep -vE '^(0\.0\.0\.0|127\.0\.0\.1|localhost|::1)$' \
+  | grep -vE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
   | sort | uniq > oisd_small_domainswild2.txt
+
+# Remove temp file
+rm -f combined_temp.txt
 
 # Remove temp file
 rm -f combined_temp.txt
